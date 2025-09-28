@@ -84,6 +84,17 @@ void mpu_init(){
   i2c_stop();
 
 
+  i2c_start();
+  i2c_write(mpu_addL|command_flag);
+  i2c_write(WHO_AM_I);
+  i2c_write(0b01101000);
+  i2c_stop();
+  //so what is this who am i register 
+  /*
+  This register is used to verify the identity of the device. The contents of WHO_AM_I are the upper 6 bits of the MPU-60X0’s 7-bit I2 C address.
+   The least significant bit of the MPU-60X0’s I2C address is determined by the value of the AD0 pin. The value of the AD0 pin is not reflected in this register. straight from the datasheet
+  */
+
 }//done
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
