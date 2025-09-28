@@ -3,7 +3,9 @@ enum MPU_6050_registers{
   SMPLRT_DIV=0x19,
   CONFIG=0x1A,
   GYRO_CONFIG=0x1B,
-  ACCEL_CONFIG=0x1C
+  ACCEL_CONFIG=0x1C,
+  INT_ENABLE=0x38,
+  WHO_AM_I=0x75 //lol this is not a joke its acually one of the register names in MPU6050
 };
 #include "MyI2C.h"
 #define mpu_addL 0x68 //when ADO pulled low 
@@ -72,6 +74,13 @@ void mpu_init(){
   i2c_write(mpu_addL|command_flag);
   i2c_write(ACCEL_CONFIG);
   i2c_write(0b00000000);//same as the gyro config register all we want is ± 2g then we send a zero to that register too
+  i2c_stop();
+
+  i2c_start();
+  i2c_write(mpu_addL|command_flag);
+  i2c_write(INT_ENABLE);
+  i2c_write(0b00000001);//we need only the data ready bit to be set to 1 for example the mot en bit when it senses motion it sends an int so the device wakes up but its used in power down mode so we dont want this
+  //and the other ints too we dont want them we want continues data int
   i2c_stop();
 
 
