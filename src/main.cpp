@@ -39,6 +39,29 @@ struct MPU_datas{
 #define my_ubrr (clk_speed/16/baud-1)
 #define accel_sen 16384.0
 #define gyro_sen  131.0
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+unsigned long last_time = 0; // Stores the timestamp of the last loop
+float dt = 0;                // "Delta Time" - the time elapsed since the last loop, in seconds. Crucial for accurate calculations.
+
+// -- Complementary Filter Variables --
+float pitch_angle = 0.0; // The calculated, stable angle for the pitch axis
+float roll_angle = 0.0;  // The calculated, stable angle for the roll axis
+const float alpha = 0.98; // The "trust factor". 0.98 means we trust the gyroscope calculation 98% and the accelerometer 2% for each loop.
+
+// -- PID Controller Variables --
+float setpoint_pitch = 0.0; // Our target angle. 0.0 means we want it perfectly level.
+float setpoint_roll = 0.0;  // Our target angle for the roll axis.
+
+// ** YOU MUST TUNE THESE VALUES! **
+// These are the "aggression" knobs. Higher values mean faster, stronger corrections.
+// A good starting point for your PWM setup is around 20.0 to 30.0
+float Kp_pitch = 25.0; 
+float Kp_roll = 25.0;
+
+// -- Servo PWM Constants (based on YOUR timer setup) --
+const int16_t SERVO_MIN_PWM = 2000;
+const int16_t SERVO_MAX_PWM = 4000;
+const int16_t SERVO_CENTER_PWM = 3000;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //PWR_MGMT_1 register mapping
@@ -183,49 +206,103 @@ void set_timer(void){
   //and the pin should be PB1 why when looking at the pinout of the uno or nano u see a arrow pointing to PB1 and it says TIMER OC1A
   DDRB|=(1<<PB1)|(1<<PB2);
 }
-//now to an important part which is the mapping like we wanna set the mapping from 0->1023 to 2000->4000 we just said why 
-uint16_t servo_map(uint16_t val){
-  //from 0-1023 to 2000-4000 ticks
-  //we need to cast the val why ? bc without it it becomes 2mil something and thats wayy beyond 16bit so we need to cast and add an offsett of 2000
-  return 2000 + ((uint32_t)val * 2000) / 1023;
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+// A function to keep the servo values within a safe range
+int16_t constrain_servo_pwm(int16_t val) {
+    if (val < SERVO_MIN_PWM) return SERVO_MIN_PWM;
+    if (val > SERVO_MAX_PWM) return SERVO_MAX_PWM;
+    return val;
+}
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//loop logic 
+void loop_logic() { // We'll put the logic in a function to keep main clean
+
+    // Step 1: Precise Timing
+    // -------------------------
+    // Calculate the time 'dt' passed since the last loop, in seconds.
+    unsigned long current_time = micros();
+    dt = (current_time - last_time) / 1000000.0f;
+    last_time = current_time;
+    // A simple guard against timing issues on the first loop or after an overflow
+    if (dt > 0.1 || dt <= 0) { dt = 0.01; }
+
+
+    // Step 2: Get Sensor Data
+    // -------------------------
+    // Use your phenomenal burst_read function to get the raw data.
+    MPU_datas mpuData;
+    burst_read(&mpuData);
+
+    // Convert raw sensor data into meaningful physical units (g's and degrees/sec)
+    float ax = mpuData.ax / accel_sen;
+    float ay = mpuData.ay / accel_sen;
+    float az = mpuData.az / accel_sen;
+    float gx = mpuData.gx / gyro_sen; // Gyro X controls Roll
+    float gy = mpuData.gy / gyro_sen; // Gyro Y controls Pitch
+
+
+    // Step 3: Sensor Fusion (The Complementary Filter)
+    // ------------------------------------------------
+    // Uses trigonometry to calculate the angle from the force of gravity. This is our "stable but noisy" reference.
+    float accel_roll  = atan2(ay, az) * 180.0 / M_PI;
+    float accel_pitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0 / M_PI;
+
+    // This single line blends the fast-but-drifting gyro with the stable-but-noisy accelerometer.
+    // It integrates the gyro speed over time and then "nudges" it towards the accelerometer angle.
+    pitch_angle = alpha * (pitch_angle + gy * dt) + (1.0 - alpha) * accel_pitch;
+    roll_angle  = alpha * (roll_angle  + gx * dt) + (1.0 - alpha) * accel_roll;
+
+
+    // Step 4: PID Control (Proportional Control)
+    // ------------------------------------------
+    // Calculate the error: how far are we from our target angle of 0?
+    float error_pitch = setpoint_pitch - pitch_angle;
+    float error_roll  = setpoint_roll - roll_angle;
+
+    // Calculate the correction. This is proportional to the error.
+    // The result is the number of PWM ticks we need to adjust the servo by.
+    int16_t pitch_correction = (int16_t)(Kp_pitch * error_pitch);
+    int16_t roll_correction  = (int16_t)(Kp_roll  * error_roll);
+
+
+    // Step 5: Command the Servos
+    // --------------------------
+    // Add the correction to the servo's center position to get the final PWM value.
+    // Note: You may need to invert a correction (e.g., SERVO_CENTER_PWM - roll_correction)
+    // if a servo moves in the wrong direction.
+    int16_t servo_pwm_pitch = SERVO_CENTER_PWM + pitch_correction;
+    int16_t servo_pwm_roll = SERVO_CENTER_PWM - roll_correction;
+
+    // Keep the PWM values within the servo's safe operating range.
+    servo_pwm_pitch = constrain_servo_pwm(servo_pwm_pitch);
+    servo_pwm_roll  = constrain_servo_pwm(servo_pwm_roll);
+
+    // Write the final values to your timer registers to move the servos.
+    OCR1A = servo_pwm_pitch; // Assumes Pitch/Tilt servo is on OC1A (PB1)
+    OCR1B = servo_pwm_roll;  // Assumes Roll servo is on OC1B (PB2)
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
 void setup() {
   i2c_init();
   mpu_init();
+  set_timer();
   //USART_init(my_ubrr);
   Serial.begin(115200);
-  //now we test if we tamed the beast or not lol
-  uint8_t who_am_i=mpu_read_register(WHO_AM_I);
- // if(who_am_i==mpu_addL){
-   // USART_strTransmit("the beast has been tamed!!!!! :)");
-  //}
-  //else 
-    //Serial.println("the beast ran away!!!!! :( ");
-    //USART_strTransmit("the beast ran away!!!!! :( ");
+  
+  _delay_ms(100);
+  last_time = micros();
+
+ 
 
 }
 char buffer[50];
 void loop() {
-  struct MPU_datas pmuData;
-  burst_read(&pmuData);
-  int16_t accel_x=pmuData.ax/accel_sen;
-  int16_t accel_y=pmuData.ay/accel_sen;
-  int16_t accel_z=pmuData.az/accel_sen;
-  ////////////////////////////////////
-  int16_t gyro_x=pmuData.gx/gyro_sen;
-  int16_t gyro_y=pmuData.gy/gyro_sen;
-  int16_t gyro_z=pmuData.gz/gyro_sen;
-  sprintf(buffer,"accel_data\n\r X:%d Y:%d Z:%d",accel_x,accel_y,accel_z);
-  Serial.println(buffer);
-  delay(100);
-  sprintf(buffer,"gyro_data\n\r X:%d Y:%d Z:%d",gyro_x,gyro_y,gyro_z);
-  Serial.println(buffer);
-
-  delay(100);
-  
-
-
-
+  loop_logic();
 }
